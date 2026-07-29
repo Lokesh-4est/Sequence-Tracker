@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>4EST Sequence Tracker</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Assembly Sequence Tracker</h1>
+          <p id="connectionStatus">Connecting to Trimble Connect…</p>
+          <p id="diagnostics" class="muted">Unique ID is the schedule key. Sequence and status come from Excel.</p>
+        </div>
+        <button id="refreshButton" class="icon-button" title="Refresh assemblies" aria-label="Refresh assemblies">↻</button>
+      </header>
+
+      <section class="toolbar" aria-label="Schedule tools">
+        <label class="button file-button">Import Excel<input id="importInput" type="file" accept=".xlsx,.xls,.csv"></label>
+        <button id="exportButton" class="button secondary">Export Excel</button>
+        <button id="templateButton" class="button secondary">Download template</button>
+      </section>
+
+      <section class="filters" aria-label="Viewer controls">
+        <label>Sequence <input id="sequenceFilter" type="number" min="1" placeholder="Any"></label>
+        <button id="showExactButton" class="button secondary">Show exact</button>
+        <button id="showUpToButton" class="button secondary">Show up to</button>
+        <button id="colorButton" class="button secondary">Color by status</button>
+        <label class="search">Search <input id="searchInput" type="search" placeholder="Unique ID or assembly mark"></label>
+      </section>
+
+      <section class="stats" aria-label="Schedule summary">
+        <article><strong id="totalCount">0</strong><span>Assemblies</span></article>
+        <article><strong id="sequencedCount">0</strong><span>Sequenced</span></article>
+        <article><strong id="progressCount">0</strong><span>In progress</span></article>
+        <article><strong id="installedCount">0</strong><span>Installed</span></article>
+      </section>
+
+      <section class="editor" aria-label="Selected assembly">
+        <div><h2>Selected assembly</h2><p id="selectedHint" class="muted">Choose an assembly row to select and zoom to it in the viewer.</p></div>
+        <div class="edit-grid">
+          <label>Unique ID<input id="selectedId" readonly></label>
+          <label>Sequence<input id="selectedSequence" type="number" min="1" placeholder="From Excel"></label>
+          <label>Status<select id="selectedStatus"><option>Planned</option><option>Released</option><option>In Progress</option><option>Installed</option><option>Blocked</option></select></label>
+          <button id="applyButton" class="button">Apply locally</button>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-label="Assemblies">
+        <table><thead><tr><th>Seq</th><th>Unique ID</th><th>Assembly Pos</th><th>Status</th><th>Model</th><th>Updated</th></tr></thead>
+        <tbody id="assemblyRows"></tbody></table>
+      </section>
+    </main>
+  </body>
+</html>
