@@ -26,7 +26,8 @@
   const assemblyMarkOf = item => valueOf(item,["Assembly/Cast unit Mark","Assembly/Cast Unit Mark","Assembly Position","Assembly Mark","Cast Unit Mark"]);
   const typeOf = item => valueOf(item,["Object Type","Type","Ifc Type","Entity","Category","Tekla Type"]);
   const runtimeIds = item => { const ids=[]; const visit=x=>{if(!x||typeof x!=="object")return; const id=Number(x.runtimeId ?? x.id);if(Number.isFinite(id))ids.push(id);(x.children||[]).forEach(visit)}; visit(item); return [...new Set(ids)]; };
-  const groups = raw => Array.isArray(raw) ? raw : raw?.modelObjectIds || raw?.objects || [];
+  const flattenRuntimeIds = objects => (objects || []).flatMap(item => typeof item === "number" ? [item] : Array.isArray(item) ? flattenRuntimeIds(item) : [item?.runtimeId,item?.id,...flattenRuntimeIds(item?.children)].filter(Boolean)).map(Number).filter(Number.isFinite);
+  const groups = raw => !Array.isArray(raw) ? [] : raw.some(item => item?.modelId && Array.isArray(item?.objects)) ? raw : [{modelId:"",modelName:"Model",objects:raw}];
 
   function toAssembly(modelId, modelName, item) {
     const uniqueId = uniqueIdOf(item); const mark = assemblyMarkOf(item); const type = typeOf(item);
@@ -35,15 +36,36 @@
     return { modelId, modelName, uniqueId, assemblyMark: mark || existing?.assemblyMark || "", runtimeIds:runtimeIds(item), sequence:existing?.sequence || "", status:existing?.status || "Planned", updatedAt:existing?.updatedAt || stamp() };
   }
 
+  function mergeAssembly(found, row) {
+    const existing = found.get(row.uniqueId);
+    if (!existing) return found.set(row.uniqueId, row);
+    existing.runtimeIds = [...new Set([...existing.runtimeIds, ...row.runtimeIds])];
+    existing.assemblyMark ||= row.assemblyMark;
+  }
+  async function collectAssemblies(rawGroups, modelNames, found) {
+    for (const group of groups(rawGroups)) {
+      const modelId=group.modelId||group.model?.id||group.id; if(!modelId) continue;
+      const modelName=group.modelName||group.name||group.model?.name||modelNames.get(modelId)||"Model";
+      const objects=Array.isArray(group.objects)?group.objects:[];
+      const ids=[...new Set(flattenRuntimeIds(objects))];
+      state.allObjectIds.push({modelId,objectRuntimeIds:ids});
+      for (const item of objects) { const row=toAssembly(modelId,modelName,item); if(row)mergeAssembly(found,row); }
+      for (let start=0; start<ids.length; start+=500) {
+        const properties=await state.workspace.viewer.getObjectProperties(modelId,ids.slice(start,start+500)).catch(()=>[]);
+        for (const item of properties || []) { const row=toAssembly(modelId,modelName,item); if(row)mergeAssembly(found,row); }
+      }
+    }
+  }
   async function refresh() {
     if (!state.workspace?.viewer) return setStatus("Standalone mode — import an Excel schedule to begin.");
     els.refresh.disabled = true; setStatus("Reading assemblies from Trimble Connect…");
     try {
       const models = await state.workspace.viewer.getModels(); const names = new Map((models||[]).map(m=>[m.id||m.modelId,m.name||m.fileName||"Model"]));
-      const raw = await state.workspace.viewer.getObjects(); const found=[]; state.allObjectIds=[];
-      for (const group of groups(raw)) { const modelId=group.modelId||group.model?.id||group.id; const objects=group.objects||[]; if(!modelId)continue; const ids=[]; for(const item of objects){const row=toAssembly(modelId,group.modelName||group.name||names.get(modelId)||"Model",item);if(row)found.push(row);ids.push(...runtimeIds(item));} state.allObjectIds.push({modelId,objectRuntimeIds:[...new Set(ids)]}); }
-      if (!found.length) { setStatus("No assemblies found", "The model must expose Unique ID plus an assembly mark/type. Importing Excel alone cannot create 3D links."); return; }
-      const byId=new Map(found.map(row=>[row.uniqueId,row])); state.assemblies=[...byId.values()]; sort(); save(); render(); setStatus(`Loaded ${state.assemblies.length} assemblies`, "Import Excel to fill the Seq column and update status.");
+      const found=new Map(); state.allObjectIds=[];
+      await collectAssemblies(await state.workspace.viewer.getObjects().catch(()=>[]),names,found);
+      if (!found.size) await collectAssemblies(await state.workspace.viewer.getObjects({selected:true}).catch(()=>[]),names,found);
+      if (!found.size) { setStatus("No assemblies found", "Full-model refresh completed, but no objects exposed both Unique ID and an assembly mark/type."); return; }
+      state.assemblies=[...found.values()]; sort(); save(); render(); setStatus(`Loaded ${state.assemblies.length} assemblies`, "Full-model refresh completed. Import Excel to fill the Seq column and update status.");
     } catch (error) { setStatus("Could not read model assemblies", error.message || String(error)); } finally { els.refresh.disabled=false; }
   }
 
