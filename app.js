@@ -1,5 +1,4 @@
 (() => {
-  const storageKey = "4est-sequence-tracker:assemblies";
   const statuses = ["Planned", "Released", "In Progress", "Installed", "Blocked"];
   const colors = { Planned:{color:"#8b98a3",opacity:35}, Released:{color:"#2670b8",opacity:70}, "In Progress":{color:"#d99028",opacity:85}, Installed:{color:"#26835b",opacity:100}, Blocked:{color:"#b4413f",opacity:90} };
   const state = { assemblies: [], workspace: null, selectedId: "", allObjectIds: [] };
@@ -11,9 +10,32 @@
   const header = value => norm(value).toLowerCase().replace(/[^a-z0-9]/g, "");
   const escapeHtml = value => norm(value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   const setStatus = (message, detail) => { els.status.textContent = message; if (detail) els.diagnostics.textContent = detail; };
-  const save = () => localStorage.setItem(storageKey, JSON.stringify(state.assemblies));
-  const load = () => { try { state.assemblies = JSON.parse(localStorage.getItem(storageKey) || "[]"); } catch { state.assemblies = []; } };
   const sort = () => state.assemblies.sort((a,b) => (Number(a.sequence)||Infinity)-(Number(b.sequence)||Infinity) || a.uniqueId.localeCompare(b.uniqueId,undefined,{numeric:true}));
+
+  function clearTransientData() {
+    state.assemblies.length = 0;
+    state.allObjectIds.length = 0;
+    state.workspace = null;
+    state.selectedId = "";
+  }
+  const setInteractive = enabled => document.querySelectorAll("button,input,select").forEach(control => { control.disabled = !enabled; });
+  function validateHostingOrigin() {
+    const configured = norm(document.querySelector('meta[name="sequence-tracker-company-origin"]')?.content).replace(/\/$/, "");
+    let expected;
+    try { expected = new URL(configured); } catch { expected = null; }
+    if (!expected || expected.protocol !== "https:" || expected.origin !== configured) {
+      setInteractive(false);
+      setStatus("Extension blocked — approved host is not configured", "Set sequence-tracker-company-origin to the dedicated company-controlled HTTPS origin before deployment.");
+      return false;
+    }
+    if (window.location.origin !== expected.origin) {
+      setInteractive(false);
+      setStatus("Extension blocked — unapproved host", `Expected ${expected.origin}; received ${window.location.origin}.`);
+      return false;
+    }
+    setInteractive(true);
+    return true;
+  }
 
   function valueOf(object, names) {
     const wanted = new Set(names.map(header)); const props = [];
@@ -65,7 +87,7 @@
       await collectAssemblies(await state.workspace.viewer.getObjects().catch(()=>[]),names,found);
       if (!found.size) await collectAssemblies(await state.workspace.viewer.getObjects({selected:true}).catch(()=>[]),names,found);
       if (!found.size) { setStatus("No assemblies found", "Full-model refresh completed, but no objects exposed both Unique ID and an assembly mark/type."); return; }
-      state.assemblies=[...found.values()]; sort(); save(); render(); setStatus(`Loaded ${state.assemblies.length} assemblies`, "Full-model refresh completed. Import Excel to fill the Seq column and update status.");
+      state.assemblies=[...found.values()]; sort(); render(); setStatus(`Loaded ${state.assemblies.length} assemblies`, "Full-model refresh completed. Import Excel to fill the Seq column and update status.");
     } catch (error) { setStatus("Could not read model assemblies", error.message || String(error)); } finally { els.refresh.disabled=false; }
   }
 
@@ -76,7 +98,7 @@
     els.rows.querySelectorAll("tr[data-id]").forEach(row=>row.addEventListener("click",()=>select(row.dataset.id)));
   }
   async function select(id) { state.selectedId=id; const row=state.assemblies.find(item=>item.uniqueId===id); if(!row)return; els.selectedId.value=row.uniqueId;els.selectedSequence.value=row.sequence;els.selectedStatus.value=row.status;els.hint.textContent=`${row.assemblyMark||"Assembly"} — ${row.modelName}`;render(); const target=[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds}]; try { await state.workspace?.viewer?.setSelection({modelObjectIds:target},"set"); await state.workspace?.viewer?.setCamera({modelObjectIds:target},{animationTime:300}); } catch {} }
-  function apply() { const row=state.assemblies.find(item=>item.uniqueId===state.selectedId);if(!row)return;row.sequence=Number(els.selectedSequence.value)||"";row.status=els.selectedStatus.value;row.updatedAt=stamp();sort();save();render();setStatus("Updated locally", "Export Excel to share these changes. Nothing is written to the Trimble model."); }
+  function apply() { const row=state.assemblies.find(item=>item.uniqueId===state.selectedId);if(!row)return;row.sequence=Number(els.selectedSequence.value)||"";row.status=els.selectedStatus.value;row.updatedAt=stamp();sort();render();setStatus("Updated in this session", "Export Excel before closing the app to keep these changes. Nothing is written to the Trimble model."); }
 
   function readColumn(row,names){const values=Object.fromEntries(Object.keys(row).map(key=>[header(key),row[key]]));return names.map(name=>norm(values[header(name)])).find(Boolean)||""}
   function parseCsv(text) {
@@ -88,7 +110,7 @@
     if (/\.csv$/i.test(file.name)) rows=parseCsv(await file.text());
     else if (window.XLSX) { const book=XLSX.read(await file.arrayBuffer(),{type:"array"}); rows=XLSX.utils.sheet_to_json(book.Sheets[book.SheetNames[0]],{defval:""}); }
     if(!rows.length)throw new Error("No readable rows. Use .xlsx, .xls, or CSV with Unique ID.");
-    let matched=0; for(const item of rows){const id=readColumn(item,["Unique ID","UniqueID","Unique Id","UDA_UID"]);const row=state.assemblies.find(value=>value.uniqueId===id);if(!row)continue;row.sequence=Number(readColumn(item,["Sequence Number","Sequence","Seq","Seq No","Proposed Sequence Number"]))||"";const status=readColumn(item,["Installation Status","Status"]);row.status=statuses.includes(status)?status:row.status;row.updatedAt=stamp();matched++;}sort();save();render();setStatus(`Imported ${matched} matching schedule rows`, `${rows.length-matched} Excel rows did not match a loaded assembly Unique ID.`);
+    let matched=0; for(const item of rows){const id=readColumn(item,["Unique ID","UniqueID","Unique Id","UDA_UID"]);const row=state.assemblies.find(value=>value.uniqueId===id);if(!row)continue;row.sequence=Number(readColumn(item,["Sequence Number","Sequence","Seq","Seq No","Proposed Sequence Number"]))||"";const status=readColumn(item,["Installation Status","Status"]);row.status=statuses.includes(status)?status:row.status;row.updatedAt=stamp();matched++;}sort();render();setStatus(`Imported ${matched} matching schedule rows`, `${rows.length-matched} Excel rows did not match a loaded assembly Unique ID.`);
   } catch(error){setStatus("Excel import failed",error.message||String(error));} finally {els.import.value=""} }
   function download(rows,name){if(window.XLSX){const book=XLSX.utils.book_new();XLSX.utils.book_append_sheet(book,XLSX.utils.json_to_sheet(rows),"Assemblies");XLSX.writeFile(book,name);return;}const csv=[Object.keys(rows[0]||{}).join(","),...rows.map(r=>Object.values(r).map(v=>`"${String(v).replace(/"/g,'""')}"`).join(","))].join("\n");const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));link.download=name;link.click();}
   function exportExcel(){download(state.assemblies.map(row=>({"Unique ID":row.uniqueId,"Assembly Position":row.assemblyMark,"Sequence Number":row.sequence,"Installation Status":row.status,"Model Name":row.modelName,"Updated At":row.updatedAt})),"assembly-sequence-tracker.xlsx");}
@@ -96,6 +118,7 @@
   const selectedForSequence=mode=>state.assemblies.filter(row=>Number(row.sequence)>0&&(mode==="exact"?Number(row.sequence)===Number(els.sequenceFilter.value):Number(row.sequence)<=Number(els.sequenceFilter.value)));
   async function show(mode){const number=Number(els.sequenceFilter.value);if(!number)return setStatus("Enter a sequence number first");const rows=selectedForSequence(mode), groupsByModel=new Map();rows.forEach(row=>{if(!groupsByModel.has(row.modelId))groupsByModel.set(row.modelId,new Set());row.runtimeIds.forEach(id=>groupsByModel.get(row.modelId).add(id));});const targets=[...groupsByModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids]}));try{await state.workspace?.viewer?.setObjectState(undefined,{visible:false});await state.workspace?.viewer?.setObjectState({modelObjectIds:targets},{visible:true});await state.workspace?.viewer?.setCamera({modelObjectIds:targets},{animationTime:300});setStatus(`Showing ${rows.length} assemblies`,`Sequence ${mode} ${number}`);}catch{setStatus(`Found ${rows.length} assemblies`,"Viewer visibility is available only inside Trimble Connect.");}}
   async function color(){try{for(const status of statuses){const rows=state.assemblies.filter(row=>row.status===status);const map=new Map();rows.forEach(row=>{if(!map.has(row.modelId))map.set(row.modelId,new Set());row.runtimeIds.forEach(id=>map.get(row.modelId).add(id));});const targets=[...map].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids]}));if(targets.length)await state.workspace?.viewer?.setObjectState({modelObjectIds:targets},colors[status]);}setStatus("Applied status colors");}catch{setStatus("Status colours are ready when opened inside Trimble Connect.");}}
-  async function connect(){load();render();const bridge=window.TrimbleConnectWorkspace;if(!bridge?.connect)return setStatus("Standalone mode — import Excel or open this as a Trimble extension.");try{state.workspace=await bridge.connect(window.parent,undefined,30000);setStatus("Connected to Trimble Connect");await refresh();}catch{setStatus("Standalone mode — connection unavailable.");}}
+  async function connect(){render();if(!validateHostingOrigin())return;const bridge=window.TrimbleConnectWorkspace;if(!bridge?.connect)return setStatus("Standalone mode — import Excel or open this as a Trimble extension.");try{state.workspace=await bridge.connect(window.parent,undefined,30000);setStatus("Connected to Trimble Connect");await refresh();}catch{setStatus("Standalone mode — connection unavailable.");}}
+  window.addEventListener("pagehide", clearTransientData);
   els.refresh.addEventListener("click",refresh);els.import.addEventListener("change",e=>importExcel(e.target.files[0]));els.export.addEventListener("click",exportExcel);els.template.addEventListener("click",template);els.apply.addEventListener("click",apply);els.search.addEventListener("input",render);els.exact.addEventListener("click",()=>show("exact"));els.upto.addEventListener("click",()=>show("upTo"));els.color.addEventListener("click",color);connect();
 })();
