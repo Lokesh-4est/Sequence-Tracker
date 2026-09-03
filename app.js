@@ -18,24 +18,6 @@
     state.workspace = null;
     state.selectedId = "";
   }
-  const setInteractive = enabled => document.querySelectorAll("button,input,select").forEach(control => { control.disabled = !enabled; });
-  function validateHostingOrigin() {
-    const configured = norm(document.querySelector('meta[name="sequence-tracker-company-origin"]')?.content).replace(/\/$/, "");
-    let expected;
-    try { expected = new URL(configured); } catch { expected = null; }
-    if (!expected || expected.protocol !== "https:" || expected.origin !== configured) {
-      setInteractive(false);
-      setStatus("Extension blocked — approved host is not configured", "Set sequence-tracker-company-origin to the dedicated company-controlled HTTPS origin before deployment.");
-      return false;
-    }
-    if (window.location.origin !== expected.origin) {
-      setInteractive(false);
-      setStatus("Extension blocked — unapproved host", `Expected ${expected.origin}; received ${window.location.origin}.`);
-      return false;
-    }
-    setInteractive(true);
-    return true;
-  }
 
   function valueOf(object, names) {
     const wanted = new Set(names.map(header)); const props = [];
@@ -118,7 +100,7 @@
   const selectedForSequence=mode=>state.assemblies.filter(row=>Number(row.sequence)>0&&(mode==="exact"?Number(row.sequence)===Number(els.sequenceFilter.value):Number(row.sequence)<=Number(els.sequenceFilter.value)));
   async function show(mode){const number=Number(els.sequenceFilter.value);if(!number)return setStatus("Enter a sequence number first");const rows=selectedForSequence(mode), groupsByModel=new Map();rows.forEach(row=>{if(!groupsByModel.has(row.modelId))groupsByModel.set(row.modelId,new Set());row.runtimeIds.forEach(id=>groupsByModel.get(row.modelId).add(id));});const targets=[...groupsByModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids]}));try{await state.workspace?.viewer?.setObjectState(undefined,{visible:false});await state.workspace?.viewer?.setObjectState({modelObjectIds:targets},{visible:true});await state.workspace?.viewer?.setCamera({modelObjectIds:targets},{animationTime:300});setStatus(`Showing ${rows.length} assemblies`,`Sequence ${mode} ${number}`);}catch{setStatus(`Found ${rows.length} assemblies`,"Viewer visibility is available only inside Trimble Connect.");}}
   async function color(){try{for(const status of statuses){const rows=state.assemblies.filter(row=>row.status===status);const map=new Map();rows.forEach(row=>{if(!map.has(row.modelId))map.set(row.modelId,new Set());row.runtimeIds.forEach(id=>map.get(row.modelId).add(id));});const targets=[...map].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids]}));if(targets.length)await state.workspace?.viewer?.setObjectState({modelObjectIds:targets},colors[status]);}setStatus("Applied status colors");}catch{setStatus("Status colours are ready when opened inside Trimble Connect.");}}
-  async function connect(){render();if(!validateHostingOrigin())return;const bridge=window.TrimbleConnectWorkspace;if(!bridge?.connect)return setStatus("Standalone mode — import Excel or open this as a Trimble extension.");try{state.workspace=await bridge.connect(window.parent,undefined,30000);setStatus("Connected to Trimble Connect");await refresh();}catch{setStatus("Standalone mode — connection unavailable.");}}
+  async function connect(){render();const bridge=window.TrimbleConnectWorkspace;if(!bridge?.connect)return setStatus("Standalone mode — import Excel or open this as a Trimble extension.");try{state.workspace=await bridge.connect(window.parent,undefined,30000);setStatus("Connected to Trimble Connect");await refresh();}catch{setStatus("Standalone mode — connection unavailable.");}}
   window.addEventListener("pagehide", clearTransientData);
   els.refresh.addEventListener("click",refresh);els.import.addEventListener("change",e=>importExcel(e.target.files[0]));els.export.addEventListener("click",exportExcel);els.template.addEventListener("click",template);els.apply.addEventListener("click",apply);els.search.addEventListener("input",render);els.exact.addEventListener("click",()=>show("exact"));els.upto.addEventListener("click",()=>show("upTo"));els.color.addEventListener("click",color);connect();
 })();
