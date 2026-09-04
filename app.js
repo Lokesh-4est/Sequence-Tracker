@@ -82,7 +82,7 @@
   async function applyStatusColor(row) {
     if (!state.workspace?.viewer) return false;
     if (!row.runtimeIds.length) throw new Error("This assembly has no viewer object IDs.");
-    const target={modelObjectIds:[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds}]};
+    const target={modelObjectIds:[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds,recursive:true}]};
     await state.workspace.viewer.setObjectState(target,colors[row.status]||colors.Planned);
     return true;
   }
@@ -90,7 +90,7 @@
     state.selectedId=id; const row=state.assemblies.find(item=>item.uniqueId===id); if(!row)return;
     els.selectedId.value=row.uniqueId;els.selectedSequence.value=row.sequence;els.selectedStatus.value=row.status;els.hint.textContent=`${row.assemblyMark||"Assembly"} — ${row.modelName}`;render();
     if (!state.workspace?.viewer) return;
-    const target=[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds}];
+    const target=[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds,recursive:true}];
     try {
       await state.workspace.viewer.setSelection({modelObjectIds:target},"set");
       await applyStatusColor(row);
@@ -123,8 +123,8 @@
   function exportExcel(){download(state.assemblies.map(row=>({"Unique ID":row.uniqueId,"Assembly Position":row.assemblyMark,"Sequence Number":row.sequence,"Installation Status":row.status,"Model Name":row.modelName,"Updated At":row.updatedAt})),"assembly-sequence-tracker.xlsx");}
   function template(){download([{"Unique ID":"Example-UID-001","Sequence Number":1,"Installation Status":"Planned"}],"assembly-sequence-template.xlsx");}
   const selectedForSequence=mode=>state.assemblies.filter(row=>Number(row.sequence)>0&&(mode==="exact"?Number(row.sequence)===Number(els.sequenceFilter.value):Number(row.sequence)<=Number(els.sequenceFilter.value)));
-  const targetsForRows=rows=>{const groupsByModel=new Map();rows.forEach(row=>{if(!groupsByModel.has(row.modelId))groupsByModel.set(row.modelId,new Set());row.runtimeIds.forEach(id=>groupsByModel.get(row.modelId).add(id));});return [...groupsByModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids]})).filter(target=>target.objectRuntimeIds.length);};
-  async function setAllVisibility(visible){if(!state.workspace?.viewer)return false;const targets=state.allObjectIds.filter(target=>target.modelId&&target.objectRuntimeIds?.length);if(targets.length)await state.workspace.viewer.setObjectState({modelObjectIds:targets},{visible});else await state.workspace.viewer.setObjectState(undefined,{visible});return true;}
+  const targetsForRows=rows=>{const groupsByModel=new Map();rows.forEach(row=>{if(!groupsByModel.has(row.modelId))groupsByModel.set(row.modelId,new Set());row.runtimeIds.forEach(id=>groupsByModel.get(row.modelId).add(id));});return [...groupsByModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids],recursive:true})).filter(target=>target.objectRuntimeIds.length);};
+  async function setAllVisibility(visible){if(!state.workspace?.viewer)return false;await state.workspace.viewer.setObjectState(undefined,{visible});return true;}
   function setSequenceMode(mode){els.exact.classList.toggle("active",mode==="exact");els.upto.classList.toggle("active",mode==="upTo");}
   async function show(mode){
     const number=Number(els.sequenceFilter.value);if(!Number.isFinite(number)||number<1)return setStatus("Enter a sequence number first");
