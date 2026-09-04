@@ -1,6 +1,6 @@
 (() => {
   const statuses = ["Planned", "Released", "In Progress", "Installed", "Blocked"];
-  const colors = { Planned:{color:"#8b98a3",opacity:35}, Released:{color:"#2670b8",opacity:70}, "In Progress":{color:"#d99028",opacity:85}, Installed:{color:"#26835b",opacity:100}, Blocked:{color:"#b4413f",opacity:90} };
+  const colors = { Planned:{color:"#64748b",opacity:85}, Released:{color:"#2563eb",opacity:100}, "In Progress":{color:"#f59e0b",opacity:100}, Installed:{color:"#16a34a",opacity:100}, Blocked:{color:"#dc2626",opacity:100} };
   const state = { assemblies: [], workspace: null, selectedId: "", allObjectIds: [] };
   const $ = id => document.getElementById(id);
   const els = { status:$("connectionStatus"), diagnostics:$("diagnostics"), refresh:$("refreshButton"), import:$("importInput"), export:$("exportButton"), template:$("templateButton"), exact:$("showExactButton"), upto:$("showUpToButton"), color:$("colorButton"), sequenceFilter:$("sequenceFilter"), search:$("searchInput"), rows:$("assemblyRows"), total:$("totalCount"), sequenced:$("sequencedCount"), progress:$("progressCount"), installed:$("installedCount"), hint:$("selectedHint"), selectedId:$("selectedId"), selectedSequence:$("selectedSequence"), selectedStatus:$("selectedStatus"), apply:$("applyButton") };
@@ -79,8 +79,33 @@
     els.rows.innerHTML=visible.length ? visible.map(row=>`<tr data-id="${escapeHtml(row.uniqueId)}" class="${row.uniqueId===state.selectedId?"selected":""}"><td>${escapeHtml(row.sequence)}</td><td>${escapeHtml(row.uniqueId)}</td><td>${escapeHtml(row.assemblyMark)}</td><td><span class="status ${header(row.status).replace("inprogress","in-progress")}">${escapeHtml(row.status)}</span></td><td>${escapeHtml(row.modelName)}</td><td>${escapeHtml(row.updatedAt)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty">No assemblies loaded. Refresh the viewer, then import an Excel schedule.</td></tr>`;
     els.rows.querySelectorAll("tr[data-id]").forEach(row=>row.addEventListener("click",()=>select(row.dataset.id)));
   }
-  async function select(id) { state.selectedId=id; const row=state.assemblies.find(item=>item.uniqueId===id); if(!row)return; els.selectedId.value=row.uniqueId;els.selectedSequence.value=row.sequence;els.selectedStatus.value=row.status;els.hint.textContent=`${row.assemblyMark||"Assembly"} — ${row.modelName}`;render(); const target=[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds}]; try { await state.workspace?.viewer?.setSelection({modelObjectIds:target},"set"); await state.workspace?.viewer?.setCamera({modelObjectIds:target},{animationTime:300}); } catch {} }
-  function apply() { const row=state.assemblies.find(item=>item.uniqueId===state.selectedId);if(!row)return;row.sequence=Number(els.selectedSequence.value)||"";row.status=els.selectedStatus.value;row.updatedAt=stamp();sort();render();setStatus("Updated in this session", "Export Excel before closing the app to keep these changes. Nothing is written to the Trimble model."); }
+  async function applyStatusColor(row) {
+    if (!state.workspace?.viewer) return false;
+    if (!row.runtimeIds.length) throw new Error("This assembly has no viewer object IDs.");
+    const target={modelObjectIds:[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds}]};
+    await state.workspace.viewer.setObjectState(target,colors[row.status]||colors.Planned);
+    return true;
+  }
+  async function select(id) {
+    state.selectedId=id; const row=state.assemblies.find(item=>item.uniqueId===id); if(!row)return;
+    els.selectedId.value=row.uniqueId;els.selectedSequence.value=row.sequence;els.selectedStatus.value=row.status;els.hint.textContent=`${row.assemblyMark||"Assembly"} — ${row.modelName}`;render();
+    if (!state.workspace?.viewer) return;
+    const target=[{modelId:row.modelId,objectRuntimeIds:row.runtimeIds}];
+    try {
+      await state.workspace.viewer.setSelection({modelObjectIds:target},"set");
+      await applyStatusColor(row);
+      await state.workspace.viewer.setCamera({modelObjectIds:target},{animationTime:300});
+      setStatus(`Selected ${row.assemblyMark||row.uniqueId}`,`${row.status} colour applied in the 3D viewer.`);
+    } catch(error) { setStatus("Assembly selected",`Could not apply its status colour: ${error.message||String(error)}`); }
+  }
+  async function apply() {
+    const row=state.assemblies.find(item=>item.uniqueId===state.selectedId);if(!row)return;
+    row.sequence=Number(els.selectedSequence.value)||"";row.status=els.selectedStatus.value;row.updatedAt=stamp();sort();render();
+    try {
+      const colored=await applyStatusColor(row);
+      setStatus("Updated in this session",colored?`${row.status} colour applied in the 3D viewer. Export Excel before closing to keep these changes.`:"Export Excel before closing the app to keep these changes. Nothing is written to the Trimble model.");
+    } catch(error) { setStatus("Status updated",`Could not apply its viewer colour: ${error.message||String(error)}`); }
+  }
 
   function readColumn(row,names){const values=Object.fromEntries(Object.keys(row).map(key=>[header(key),row[key]]));return names.map(name=>norm(values[header(name)])).find(Boolean)||""}
   function parseCsv(text) {
