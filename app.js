@@ -1,7 +1,7 @@
 (() => {
   const statuses = ["Planned", "Released", "In Progress", "Installed", "Blocked"];
   const colors = { Planned:{color:"#64748b",opacity:85}, Released:{color:"#2563eb",opacity:100}, "In Progress":{color:"#f59e0b",opacity:100}, Installed:{color:"#16a34a",opacity:100}, Blocked:{color:"#dc2626",opacity:100} };
-  const state = { assemblies: [], workspace: null, selectedId: "", allObjectIds: [] };
+  const state = { assemblies: [], workspace: null, selectedId: "", allObjectIds: [], renderableObjectIds: [] };
   const $ = id => document.getElementById(id);
   const els = { status:$("connectionStatus"), diagnostics:$("diagnostics"), refresh:$("refreshButton"), import:$("importInput"), export:$("exportButton"), template:$("templateButton"), exact:$("showExactButton"), upto:$("showUpToButton"), color:$("colorButton"), sequenceFilter:$("sequenceFilter"), search:$("searchInput"), rows:$("assemblyRows"), total:$("totalCount"), sequenced:$("sequencedCount"), progress:$("progressCount"), installed:$("installedCount"), hint:$("selectedHint"), selectedId:$("selectedId"), selectedSequence:$("selectedSequence"), selectedStatus:$("selectedStatus"), apply:$("applyButton") };
 
@@ -15,6 +15,7 @@
   function clearTransientData() {
     state.assemblies.length = 0;
     state.allObjectIds.length = 0;
+    state.renderableObjectIds.length = 0;
     state.workspace = null;
     state.selectedId = "";
   }
@@ -65,7 +66,7 @@
     els.refresh.disabled = true; setStatus("Reading assemblies from Trimble Connect…");
     try {
       const models = await state.workspace.viewer.getModels(); const names = new Map((models||[]).map(m=>[m.id||m.modelId,m.name||m.fileName||"Model"]));
-      const found=new Map(); state.allObjectIds=[];
+      const found=new Map(); state.allObjectIds=[];state.renderableObjectIds=[];
       await collectAssemblies(await state.workspace.viewer.getObjects().catch(()=>[]),names,found);
       if (!found.size) await collectAssemblies(await state.workspace.viewer.getObjects({selected:true}).catch(()=>[]),names,found);
       if (!found.size) { setStatus("No assemblies found", "Full-model refresh completed, but no objects exposed both Unique ID and an assembly mark/type."); return; }
@@ -124,16 +125,69 @@
   function template(){download([{"Unique ID":"Example-UID-001","Sequence Number":1,"Installation Status":"Planned"}],"assembly-sequence-template.xlsx");}
   const selectedForSequence=mode=>state.assemblies.filter(row=>Number(row.sequence)>0&&(mode==="exact"?Number(row.sequence)===Number(els.sequenceFilter.value):Number(row.sequence)<=Number(els.sequenceFilter.value)));
   const targetsForRows=rows=>{const groupsByModel=new Map();rows.forEach(row=>{if(!groupsByModel.has(row.modelId))groupsByModel.set(row.modelId,new Set());row.runtimeIds.forEach(id=>groupsByModel.get(row.modelId).add(id));});return [...groupsByModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids],recursive:true})).filter(target=>target.objectRuntimeIds.length);};
-  async function setAllVisibility(visible){if(!state.workspace?.viewer)return false;await state.workspace.viewer.setObjectState(undefined,{visible});return true;}
+  async function expandAssemblyTargets(targets){
+    const viewer=state.workspace?.viewer;if(!viewer)return targets;
+    const expanded=[];
+    for(const target of targets){
+      const ids=new Set(target.objectRuntimeIds);
+      if(typeof viewer.getHierarchyChildren==="function"){
+        try{const children=await viewer.getHierarchyChildren(target.modelId,[...ids],4,true);(children||[]).forEach(child=>{const id=Number(child?.id);if(Number.isFinite(id))ids.add(id);});}catch{}
+      }
+      expanded.push({modelId:target.modelId,objectRuntimeIds:[...ids],recursive:true});
+    }
+    return expanded;
+  }
+  async function boundingBoxIds(target){
+    const viewer=state.workspace?.viewer;if(!viewer)return [];
+    const ids=[];
+    for(let start=0;start<target.objectRuntimeIds.length;start+=500){
+      const boxes=await viewer.getObjectBoundingBoxes(target.modelId,target.objectRuntimeIds.slice(start,start+500));
+      (boxes||[]).forEach(box=>{const id=Number(box?.id);if(Number.isFinite(id))ids.push(id);});
+    }
+    return [...new Set(ids)];
+  }
+  async function getRenderableObjectIds(){
+    if(state.renderableObjectIds.length)return state.renderableObjectIds;
+    const renderable=[];
+    for(const target of state.allObjectIds){
+      const ids=await boundingBoxIds(target);
+      if(ids.length)renderable.push({modelId:target.modelId,objectRuntimeIds:ids});
+    }
+    state.renderableObjectIds=renderable;
+    return renderable;
+  }
+  async function isolateTargets(targets){
+    const viewer=state.workspace?.viewer;if(!viewer)return targets;
+    const expanded=await expandAssemblyTargets(targets);
+    const visibleTargets=[];
+    for(const target of expanded){
+      const ids=await boundingBoxIds(target);
+      if(ids.length)visibleTargets.push({modelId:target.modelId,objectRuntimeIds:ids});
+    }
+    if(!visibleTargets.length)throw new Error("The matching assemblies do not expose renderable geometry IDs.");
+    const visibleByModel=new Map(visibleTargets.map(target=>[target.modelId,new Set(target.objectRuntimeIds)]));
+    const allRenderable=await getRenderableObjectIds();
+    if(!allRenderable.length)throw new Error("The viewer did not return renderable model objects.");
+    await viewer.setObjectState(undefined,{visible:"reset"});
+    for(const target of allRenderable){
+      const visibleIds=visibleByModel.get(target.modelId)||new Set();
+      const hiddenIds=target.objectRuntimeIds.filter(id=>!visibleIds.has(id));
+      if(hiddenIds.length)await viewer.setObjectState({modelObjectIds:[{modelId:target.modelId,objectRuntimeIds:hiddenIds}]},{visible:false});
+    }
+    await viewer.setObjectState({modelObjectIds:visibleTargets},{visible:true});
+    return visibleTargets;
+  }
+  async function setAllVisibility(visible){if(!state.workspace?.viewer)return false;await state.workspace.viewer.setObjectState(undefined,{visible:visible?"reset":false});return true;}
   function setSequenceMode(mode){els.exact.classList.toggle("active",mode==="exact");els.upto.classList.toggle("active",mode==="upTo");}
   async function show(mode){
     const number=Number(els.sequenceFilter.value);if(!Number.isFinite(number)||number<1)return setStatus("Enter a sequence number first");
     setSequenceMode(mode);const rows=selectedForSequence(mode),targets=targetsForRows(rows);
     if(!state.workspace?.viewer)return setStatus(`Found ${rows.length} assemblies`,"Viewer visibility is available only inside Trimble Connect.");
     try{
-      await setAllVisibility(false);
-      if(targets.length){await state.workspace.viewer.setObjectState({modelObjectIds:targets},{visible:true});await state.workspace.viewer.setCamera({modelObjectIds:targets},{animationTime:300});}
-      setStatus(`Showing ${rows.length} assemblies`,mode==="exact"?`Sequence ${number} only`:`Sequences up to ${number}`);
+      let viewerObjectCount=0;
+      if(targets.length){const visibleTargets=await isolateTargets(targets);viewerObjectCount=visibleTargets.reduce((sum,target)=>sum+target.objectRuntimeIds.length,0);await state.workspace.viewer.setCamera({modelObjectIds:visibleTargets},{animationTime:300});}else await setAllVisibility(false);
+      const filterMessage=mode==="exact"?`Sequence ${number} only`:`Sequences up to ${number}`;
+      setStatus(`Showing ${rows.length} assemblies`,`${filterMessage} · ${viewerObjectCount} viewer object IDs`);
     }catch(error){setStatus(`Found ${rows.length} assemblies`,`Could not update viewer visibility: ${error.message||String(error)}`);}
   }
   async function showAll(){setSequenceMode("upTo");if(!state.workspace?.viewer)return;try{await setAllVisibility(true);setStatus("Showing all assemblies","Sequence filter cleared.");}catch(error){setStatus("Could not restore viewer visibility",error.message||String(error));}}
