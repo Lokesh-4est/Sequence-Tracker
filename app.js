@@ -1,6 +1,7 @@
 (() => {
   const statuses = ["Planned", "Released", "In Progress", "Installed", "Blocked"];
   const colors = { Planned:{color:"#64748b",opacity:85}, Released:{color:"#2563eb",opacity:100}, "In Progress":{color:"#f59e0b",opacity:100}, Installed:{color:"#16a34a",opacity:100}, Blocked:{color:"#dc2626",opacity:100} };
+  const nonGeometryClasses = new Set(["IFCELEMENTASSEMBLY","IFCPROJECT","IFCSITE","IFCBUILDING","IFCBUILDINGSTOREY","IFCSPACE","IFCSYSTEM","IFCZONE","IFCGROUP"]);
   const state = { assemblies: [], workspace: null, selectedId: "", allObjectIds: [], renderableObjectIds: [] };
   const $ = id => document.getElementById(id);
   const els = { status:$("connectionStatus"), diagnostics:$("diagnostics"), refresh:$("refreshButton"), import:$("importInput"), export:$("exportButton"), template:$("templateButton"), exact:$("showExactButton"), upto:$("showUpToButton"), color:$("colorButton"), sequenceFilter:$("sequenceFilter"), search:$("searchInput"), rows:$("assemblyRows"), total:$("totalCount"), sequenced:$("sequencedCount"), progress:$("progressCount"), installed:$("installedCount"), hint:$("selectedHint"), selectedId:$("selectedId"), selectedSequence:$("selectedSequence"), selectedStatus:$("selectedStatus"), apply:$("applyButton") };
@@ -125,49 +126,55 @@
   function template(){download([{"Unique ID":"Example-UID-001","Sequence Number":1,"Installation Status":"Planned"}],"assembly-sequence-template.xlsx");}
   const selectedForSequence=mode=>state.assemblies.filter(row=>Number(row.sequence)>0&&(mode==="exact"?Number(row.sequence)===Number(els.sequenceFilter.value):Number(row.sequence)<=Number(els.sequenceFilter.value)));
   const targetsForRows=rows=>{const groupsByModel=new Map();rows.forEach(row=>{if(!groupsByModel.has(row.modelId))groupsByModel.set(row.modelId,new Set());row.runtimeIds.forEach(id=>groupsByModel.get(row.modelId).add(id));});return [...groupsByModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids],recursive:true})).filter(target=>target.objectRuntimeIds.length);};
-  async function expandAssemblyTargets(targets){
+  async function objectPropertiesForIds(modelId,ids){
+    const viewer=state.workspace?.viewer;if(!viewer)return [];
+    const properties=[];
+    for(let start=0;start<ids.length;start+=500)properties.push(...await viewer.getObjectProperties(modelId,ids.slice(start,start+500)));
+    return properties;
+  }
+  const geometryIdsFromProperties=properties=>[...new Set((properties||[]).filter(item=>!nonGeometryClasses.has(String(item?.class||"").toUpperCase())).map(item=>Number(item?.runtimeId??item?.id)).filter(Number.isFinite))];
+  async function geometryTargetsForAssemblies(targets){
     const viewer=state.workspace?.viewer;if(!viewer)return targets;
-    const expanded=[];
+    const geometryTargets=[];
     for(const target of targets){
       const ids=new Set(target.objectRuntimeIds);
       if(typeof viewer.getHierarchyChildren==="function"){
-        try{const children=await viewer.getHierarchyChildren(target.modelId,[...ids],4,true);(children||[]).forEach(child=>{const id=Number(child?.id);if(Number.isFinite(id))ids.add(id);});}catch{}
+        const children=await viewer.getHierarchyChildren(target.modelId,[...ids],4,true);
+        (children||[]).forEach(child=>{const id=Number(child?.id);if(Number.isFinite(id))ids.add(id);});
       }
-      expanded.push({modelId:target.modelId,objectRuntimeIds:[...ids],recursive:true});
+      const geometryIds=geometryIdsFromProperties(await objectPropertiesForIds(target.modelId,[...ids]));
+      if(geometryIds.length)geometryTargets.push({modelId:target.modelId,objectRuntimeIds:geometryIds,recursive:false});
     }
-    return expanded;
+    return geometryTargets;
   }
-  async function normalizedSelectionTargets(selection){
-    const viewer=state.workspace?.viewer;
-    const byModel=new Map();
-    for(const group of selection||[]){
-      const modelId=group?.modelId||group?.model?.id||group?.id;if(!modelId)continue;
-      let ids=flattenRuntimeIds(group.objectRuntimeIds||group.objects||[]);
-      if(!ids.length&&Array.isArray(group.objectIds)&&typeof viewer?.convertToObjectRuntimeIds==="function"){
-        ids=flattenRuntimeIds(await viewer.convertToObjectRuntimeIds(modelId,group.objectIds));
-      }
-      if(!byModel.has(modelId))byModel.set(modelId,new Set());
-      ids.forEach(id=>byModel.get(modelId).add(id));
+  async function allGeometryTargets(){
+    if(state.renderableObjectIds.length)return state.renderableObjectIds;
+    const targets=[];
+    for(const group of state.allObjectIds){
+      const geometryIds=geometryIdsFromProperties(await objectPropertiesForIds(group.modelId,group.objectRuntimeIds));
+      if(geometryIds.length)targets.push({modelId:group.modelId,objectRuntimeIds:geometryIds,recursive:false});
     }
-    return [...byModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids],recursive:true})).filter(target=>target.objectRuntimeIds.length);
-  }
-  function countViewerObjects(rawGroups){
-    return (rawGroups||[]).reduce((count,group)=>count+new Set(flattenRuntimeIds(group?.objects||[])).size,0);
+    state.renderableObjectIds=targets;
+    return targets;
   }
   async function isolateTargets(targets){
     const viewer=state.workspace?.viewer;if(!viewer)return targets;
-    if(typeof viewer.isolateEntities!=="function")throw new Error("This Trimble Connect viewer does not expose the isolateEntities API.");
-    const expanded=await expandAssemblyTargets(targets);
+    const visibleTargets=await geometryTargetsForAssemblies(targets);
+    if(!visibleTargets.length)throw new Error("The matching assemblies do not expose geometric child objects.");
+    const allGeometry=await allGeometryTargets();
+    const visibleByModel=new Map(visibleTargets.map(target=>[target.modelId,new Set(target.objectRuntimeIds)]));
     await viewer.setObjectState(undefined,{visible:"reset"});
-    await viewer.setSelection({modelObjectIds:expanded},"set");
-    const visibleTargets=await normalizedSelectionTargets(await viewer.getSelection());
-    if(!visibleTargets.length)throw new Error("Trimble Connect did not select any runtime objects for the matching assemblies.");
-    const isolated=await viewer.isolateEntities(visibleTargets.map(target=>({modelId:target.modelId,entityIds:target.objectRuntimeIds})));
-    if(isolated!==true)throw new Error("Trimble Connect rejected the show-only-selected operation.");
-    const visibleObjects=await viewer.getObjects({modelObjectIds:visibleTargets},{visible:true});
-    const visibleCount=countViewerObjects(visibleObjects);
-    if(!visibleCount)throw new Error("Trimble Connect completed isolation but returned no visible target objects.");
-    return {visibleTargets,visibleCount};
+    for(const group of allGeometry){
+      const visibleIds=visibleByModel.get(group.modelId)||new Set();
+      const hiddenIds=group.objectRuntimeIds.filter(id=>!visibleIds.has(id));
+      if(hiddenIds.length)await viewer.setObjectState({modelObjectIds:[{modelId:group.modelId,objectRuntimeIds:hiddenIds,recursive:false}]},{visible:false});
+    }
+    await viewer.setObjectState({modelObjectIds:visibleTargets},{visible:true});
+    const hiddenGroups=await viewer.getObjects(undefined,{visible:false});
+    const hiddenByModel=new Map((hiddenGroups||[]).map(group=>[group.modelId,new Set(flattenRuntimeIds(group.objects||[]))]));
+    const hiddenTargetCount=visibleTargets.reduce((count,target)=>count+target.objectRuntimeIds.filter(id=>hiddenByModel.get(target.modelId)?.has(id)).length,0);
+    if(hiddenTargetCount)throw new Error(`Trimble Connect left ${hiddenTargetCount} target geometry objects hidden.`);
+    return {visibleTargets,visibleCount:visibleTargets.reduce((count,target)=>count+target.objectRuntimeIds.length,0)};
   }
   async function setAllVisibility(visible){if(!state.workspace?.viewer)return false;await state.workspace.viewer.setObjectState(undefined,{visible:visible?"reset":false});return true;}
   function setSequenceMode(mode){els.exact.classList.toggle("active",mode==="exact");els.upto.classList.toggle("active",mode==="upTo");}
