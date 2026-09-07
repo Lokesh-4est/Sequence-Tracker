@@ -137,45 +137,37 @@
     }
     return expanded;
   }
-  async function boundingBoxIds(target){
-    const viewer=state.workspace?.viewer;if(!viewer)return [];
-    const ids=[];
-    for(let start=0;start<target.objectRuntimeIds.length;start+=500){
-      const boxes=await viewer.getObjectBoundingBoxes(target.modelId,target.objectRuntimeIds.slice(start,start+500));
-      (boxes||[]).forEach(box=>{const id=Number(box?.id);if(Number.isFinite(id))ids.push(id);});
+  async function normalizedSelectionTargets(selection){
+    const viewer=state.workspace?.viewer;
+    const byModel=new Map();
+    for(const group of selection||[]){
+      const modelId=group?.modelId||group?.model?.id||group?.id;if(!modelId)continue;
+      let ids=flattenRuntimeIds(group.objectRuntimeIds||group.objects||[]);
+      if(!ids.length&&Array.isArray(group.objectIds)&&typeof viewer?.convertToObjectRuntimeIds==="function"){
+        ids=flattenRuntimeIds(await viewer.convertToObjectRuntimeIds(modelId,group.objectIds));
+      }
+      if(!byModel.has(modelId))byModel.set(modelId,new Set());
+      ids.forEach(id=>byModel.get(modelId).add(id));
     }
-    return [...new Set(ids)];
+    return [...byModel].map(([modelId,ids])=>({modelId,objectRuntimeIds:[...ids],recursive:true})).filter(target=>target.objectRuntimeIds.length);
   }
-  async function getRenderableObjectIds(){
-    if(state.renderableObjectIds.length)return state.renderableObjectIds;
-    const renderable=[];
-    for(const target of state.allObjectIds){
-      const ids=await boundingBoxIds(target);
-      if(ids.length)renderable.push({modelId:target.modelId,objectRuntimeIds:ids});
-    }
-    state.renderableObjectIds=renderable;
-    return renderable;
+  function countViewerObjects(rawGroups){
+    return (rawGroups||[]).reduce((count,group)=>count+new Set(flattenRuntimeIds(group?.objects||[])).size,0);
   }
   async function isolateTargets(targets){
     const viewer=state.workspace?.viewer;if(!viewer)return targets;
+    if(typeof viewer.isolateEntities!=="function")throw new Error("This Trimble Connect viewer does not expose the isolateEntities API.");
     const expanded=await expandAssemblyTargets(targets);
-    const visibleTargets=[];
-    for(const target of expanded){
-      const ids=await boundingBoxIds(target);
-      if(ids.length)visibleTargets.push({modelId:target.modelId,objectRuntimeIds:ids});
-    }
-    if(!visibleTargets.length)throw new Error("The matching assemblies do not expose renderable geometry IDs.");
-    const visibleByModel=new Map(visibleTargets.map(target=>[target.modelId,new Set(target.objectRuntimeIds)]));
-    const allRenderable=await getRenderableObjectIds();
-    if(!allRenderable.length)throw new Error("The viewer did not return renderable model objects.");
     await viewer.setObjectState(undefined,{visible:"reset"});
-    for(const target of allRenderable){
-      const visibleIds=visibleByModel.get(target.modelId)||new Set();
-      const hiddenIds=target.objectRuntimeIds.filter(id=>!visibleIds.has(id));
-      if(hiddenIds.length)await viewer.setObjectState({modelObjectIds:[{modelId:target.modelId,objectRuntimeIds:hiddenIds}]},{visible:false});
-    }
-    await viewer.setObjectState({modelObjectIds:visibleTargets},{visible:true});
-    return visibleTargets;
+    await viewer.setSelection({modelObjectIds:expanded},"set");
+    const visibleTargets=await normalizedSelectionTargets(await viewer.getSelection());
+    if(!visibleTargets.length)throw new Error("Trimble Connect did not select any runtime objects for the matching assemblies.");
+    const isolated=await viewer.isolateEntities(visibleTargets.map(target=>({modelId:target.modelId,entityIds:target.objectRuntimeIds})));
+    if(isolated!==true)throw new Error("Trimble Connect rejected the show-only-selected operation.");
+    const visibleObjects=await viewer.getObjects({modelObjectIds:visibleTargets},{visible:true});
+    const visibleCount=countViewerObjects(visibleObjects);
+    if(!visibleCount)throw new Error("Trimble Connect completed isolation but returned no visible target objects.");
+    return {visibleTargets,visibleCount};
   }
   async function setAllVisibility(visible){if(!state.workspace?.viewer)return false;await state.workspace.viewer.setObjectState(undefined,{visible:visible?"reset":false});return true;}
   function setSequenceMode(mode){els.exact.classList.toggle("active",mode==="exact");els.upto.classList.toggle("active",mode==="upTo");}
@@ -185,10 +177,14 @@
     if(!state.workspace?.viewer)return setStatus(`Found ${rows.length} assemblies`,"Viewer visibility is available only inside Trimble Connect.");
     try{
       let viewerObjectCount=0;
-      if(targets.length){const visibleTargets=await isolateTargets(targets);viewerObjectCount=visibleTargets.reduce((sum,target)=>sum+target.objectRuntimeIds.length,0);await state.workspace.viewer.setCamera({modelObjectIds:visibleTargets},{animationTime:300});}else await setAllVisibility(false);
+      let cameraWarning="";
+      if(targets.length){
+        const isolated=await isolateTargets(targets);viewerObjectCount=isolated.visibleCount;
+        try{await state.workspace.viewer.setCamera({modelObjectIds:isolated.visibleTargets},{animationTime:300});}catch(error){cameraWarning=` · Camera fit failed: ${error.message||String(error)}`;}
+      }else await setAllVisibility(false);
       const filterMessage=mode==="exact"?`Sequence ${number} only`:`Sequences up to ${number}`;
-      setStatus(`Showing ${rows.length} assemblies`,`${filterMessage} · ${viewerObjectCount} viewer object IDs`);
-    }catch(error){setStatus(`Found ${rows.length} assemblies`,`Could not update viewer visibility: ${error.message||String(error)}`);}
+      setStatus(`Showing ${rows.length} assemblies`,`${filterMessage} · ${viewerObjectCount} verified visible objects${cameraWarning}`);
+    }catch(error){await setAllVisibility(true).catch(()=>{});setStatus(`Found ${rows.length} assemblies`,`Viewer isolation failed; full-model visibility was restored. ${error.message||String(error)}`);}
   }
   async function showAll(){setSequenceMode("upTo");if(!state.workspace?.viewer)return;try{await setAllVisibility(true);setStatus("Showing all assemblies","Sequence filter cleared.");}catch(error){setStatus("Could not restore viewer visibility",error.message||String(error));}}
   let sequenceInputTimer;
