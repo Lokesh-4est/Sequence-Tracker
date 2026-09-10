@@ -22,6 +22,7 @@
 
       <section class="toolbar" aria-label="Schedule tools">
         <label class="button file-button">Import Excel<input id="importInput" type="file" accept=".xlsx,.xls,.csv"></label>
+        <button id="importToTrimbleButton" class="button" disabled>Import to Trimble</button>
         <button id="exportButton" class="button secondary">Export Excel</button>
         <button id="templateButton" class="button secondary">Download template</button>
       </section>
@@ -47,7 +48,7 @@
           <label>Unique ID<input id="selectedId" readonly></label>
           <label>Sequence<input id="selectedSequence" type="number" min="1" placeholder="From Excel"></label>
           <label>Status<select id="selectedStatus"><option>Planned</option><option>Released</option><option>In Progress</option><option>Installed</option><option>Blocked</option></select></label>
-          <button id="applyButton" class="button">Apply locally</button>
+          <button id="applyButton" class="button" disabled>Save to Trimble</button>
         </div>
       </section>
 
