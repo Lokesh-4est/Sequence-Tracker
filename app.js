@@ -164,7 +164,7 @@
     const statusValues=Object.fromEntries(statuses.map(status=>[status,enumValues.find(value=>header(value)===header(status))]));
     const missingStatuses=statuses.filter(status=>statusValues[status]===undefined);
     if(missingStatuses.length)throw new Error(`Installation Status dropdown is missing: ${missingStatuses.join(", ")}.`);
-    return {...services,libraryId:library.id,definitionId:definition.id,schemaVersion:definition.v,keys,statusValues};
+    return {...services,libraryId:library.id,definitionId:definition.id,keys,statusValues};
   }
   async function discoverStorage() {
     const services=await resolveServiceUrls();const projectId=state.project?.id;
@@ -337,7 +337,12 @@
     const existing=psetInstancesOf(row);
     return objectGuids.map(objectGuid=>{
       const link=`frn:entity:${objectGuid}`;const saved=existing[link];
-      return {row,link,expected:{sequence,status:row.status},item:{link,libId:s.libraryId,defId:s.definitionId,schemaV:s.schemaVersion,v:Number.isInteger(saved?.v)?saved.v:-1,props}};
+      const item={link,libId:s.libraryId,defId:s.definitionId,v:Number.isInteger(saved?.v)?saved.v:-1,props};
+      // A definition's resource revision (`v`) is not its schema version (`schemaV`).
+      // Let Trimble choose the current schema for a new PSet; preserve the
+      // server-returned schema version only when updating an existing PSet.
+      if(Number.isInteger(saved?.schemaV))item.schemaV=saved.schemaV;
+      return {row,link,expected:{sequence,status:row.status},item};
     });
   }
   async function saveRowsToTrimble(rows) {
