@@ -52,27 +52,34 @@
   }
   const uniqueIdOf = item => valueOf(item,["Unique ID","UniqueID","UniqueId","UDA_UID","UDA UID","Assembly Unique ID","Assembly UDA_UID"]);
   const objectGuidOf = item => norm(item?.globalId ?? item?.globalID ?? item?.guid ?? item?.ifcGuid) || valueOf(item,["GlobalId","Global ID","IFC GlobalId","IFC GUID","GUID"]);
+  const objectGuidsOf = row => [...new Set([...(Array.isArray(row?.objectGuids)?row.objectGuids:[]),row?.objectGuid].map(norm).filter(Boolean))];
+  const psetInstancesOf = row => {
+    if(!row.psetInstances||typeof row.psetInstances!=="object")row.psetInstances={};
+    if(row.psetLink&&!row.psetInstances[row.psetLink])row.psetInstances[row.psetLink]={v:row.psetVersion,schemaV:row.psetSchemaVersion};
+    return row.psetInstances;
+  };
   const assemblyMarkOf = item => valueOf(item,["Assembly/Cast unit Mark","Assembly/Cast Unit Mark","Assembly Position","Assembly Mark","Cast Unit Mark"]);
   const typeOf = item => valueOf(item,["Object Type","Type","Ifc Type","Entity","Category","Tekla Type"]);
   const runtimeIds = item => { const ids=[]; const visit=x=>{if(!x||typeof x!=="object")return; const id=Number(x.runtimeId ?? x.id);if(Number.isFinite(id))ids.push(id);(x.children||[]).forEach(visit)}; visit(item); return [...new Set(ids)]; };
   const flattenRuntimeIds = objects => (objects || []).flatMap(item => typeof item === "number" ? [item] : Array.isArray(item) ? flattenRuntimeIds(item) : [item?.runtimeId,item?.id,...flattenRuntimeIds(item?.children)].filter(Boolean)).map(Number).filter(Number.isFinite);
   const groups = raw => !Array.isArray(raw) ? [] : raw.some(item => item?.modelId && Array.isArray(item?.objects)) ? raw : [{modelId:"",modelName:"Model",objects:raw}];
 
-  function toAssembly(modelId, modelName, item) {
-    const uniqueId = uniqueIdOf(item); const mark = assemblyMarkOf(item); const type = typeOf(item); const objectGuid = objectGuidOf(item);
+  function toAssembly(modelId, modelName, item, externalId="") {
+    const uniqueId = uniqueIdOf(item); const mark = assemblyMarkOf(item); const type = typeOf(item); const objectGuid = norm(externalId)||objectGuidOf(item);
     if (!uniqueId || (!mark && !/assembly|cast.?unit/i.test(type))) return null;
     const existing = state.assemblies.find(row => norm(row.uniqueId).toLowerCase() === norm(uniqueId).toLowerCase());
-    const sameObject=!objectGuid||!existing?.objectGuid||objectGuid===existing.objectGuid;
-    return { modelId, modelName, uniqueId, objectGuid:objectGuid || existing?.objectGuid || "", ambiguousGuid:sameObject&&(existing?.ambiguousGuid||false), assemblyMark: mark || existing?.assemblyMark || "", runtimeIds:runtimeIds(item), sequence:existing?.sequence || "", status:existing?.status || "Planned", updatedAt:existing?.updatedAt || stamp(), psetLink:sameObject?(existing?.psetLink||""):"", psetVersion:sameObject?existing?.psetVersion:undefined, psetSchemaVersion:sameObject?existing?.psetSchemaVersion:undefined };
+    const objectGuids=objectGuid?[objectGuid]:[];
+    return { modelId, modelName, uniqueId, objectGuid:objectGuids[0]||"", objectGuids, assemblyMark: mark || existing?.assemblyMark || "", runtimeIds:runtimeIds(item), sequence:existing?.sequence || "", status:existing?.status || "Planned", updatedAt:existing?.updatedAt || stamp(), psetInstances:{...(existing?.psetInstances||{})}, psetLink:existing?.psetLink||"", psetVersion:existing?.psetVersion, psetSchemaVersion:existing?.psetSchemaVersion };
   }
 
   function mergeAssembly(found, row) {
     const key=norm(row.uniqueId).toLowerCase();const existing = found.get(key);
     if (!existing) return found.set(key, row);
     existing.runtimeIds = [...new Set([...existing.runtimeIds, ...row.runtimeIds])];
+    existing.objectGuids = [...new Set([...objectGuidsOf(existing),...objectGuidsOf(row)])];
+    existing.objectGuid = existing.objectGuids[0]||"";
+    existing.psetInstances = {...psetInstancesOf(row),...psetInstancesOf(existing)};
     existing.assemblyMark ||= row.assemblyMark;
-    existing.objectGuid ||= row.objectGuid;
-    if (existing.objectGuid && row.objectGuid && existing.objectGuid !== row.objectGuid) existing.ambiguousGuid = true;
   }
 
   const trimbleHost = hostname => hostname === "connect.trimble.com" || hostname.endsWith(".connect.trimble.com");
@@ -174,28 +181,38 @@
     if(!definition)throw new Error(`Definition "${psetConfig.definitionName}" was not found in "${psetConfig.libraryName}".`);
     return storageDefinition(library,definition,services);
   }
-  const entityGuidFromLink = link => {const match=norm(link).match(/(?:^|\/)entity:([^/]+)$/);return match?safeDecode(match[1]):"";};
+  const entityGuidFromLink = link => {const match=norm(link).match(/(?:^|[:/])entity:([^/]+)$/i);return match?safeDecode(match[1]):"";};
   const displayTimestamp = value => norm(value).replace("T"," ").replace(/\.\d+Z$/,"Z").slice(0,19);
   const statusFromStored = value => statuses.find(status=>header(state.storage?.statusValues?.[status])===header(value))||"";
   async function loadSavedSchedule({announce=true}={}) {
-    if(!state.storage||!state.accessToken)return {loaded:0,snapshots:new Map()};
+    if(!state.storage||!state.accessToken)return {loaded:0,snapshots:new Map(),instances:new Map()};
     const s=state.storage;const path=`libs/${encodeURIComponent(s.libraryId)}/defs/${encodeURIComponent(s.definitionId)}/psets?top=500`;
-    const instances=await listAll(s.psetApi,path);const byGuid=new Map(state.assemblies.filter(row=>row.objectGuid).map(row=>[row.objectGuid,row]));const byUnique=new Map(state.assemblies.map(row=>[norm(row.uniqueId).toLowerCase(),row]));const snapshots=new Map();let loaded=0;
+    const instances=await listAll(s.psetApi,path);const byGuid=new Map();const byUnique=new Map(state.assemblies.map(row=>[norm(row.uniqueId).toLowerCase(),row]));const snapshots=new Map();const instanceSnapshots=new Map();const rowInstances=new Map();
+    state.assemblies.forEach(row=>objectGuidsOf(row).forEach(guid=>byGuid.set(guid,row)));
     for(const instance of instances){
       const props=instance?.props||{};const storedUnique=norm(props[s.keys.uniqueId]);const row=byGuid.get(entityGuidFromLink(instance.link))||byUnique.get(storedUnique.toLowerCase());
       if(!row)continue;
-      row.psetLink=instance.link;row.psetVersion=instance.v;row.psetSchemaVersion=instance.schemaV;
+      const link=norm(instance.link);const instanceState={v:instance.v,schemaV:instance.schemaV,modifiedAt:instance.modifiedAt};
+      if(link)psetInstancesOf(row)[link]=instanceState;
+      row.psetLink ||= link;row.psetVersion ??= instance.v;row.psetSchemaVersion ??= instance.schemaV;
       const sequence=Number(props[s.keys.sequence]);const status=statusFromStored(props[s.keys.status]);
-      snapshots.set(norm(row.uniqueId).toLowerCase(),{sequence:Number.isInteger(sequence)&&sequence>0?sequence:"",status:status||row.status,link:instance.link});
-      if(!state.dirtyIds.has(row.uniqueId)){
-        row.sequence=Number.isInteger(sequence)&&sequence>0?sequence:"";
-        if(status)row.status=status;
-        row.updatedAt=displayTimestamp(instance.modifiedAt)||row.updatedAt;loaded++;
+      const snapshot={sequence:Number.isInteger(sequence)&&sequence>0?sequence:"",status:status||row.status,link,modifiedAt:norm(instance.modifiedAt)};
+      if(link)instanceSnapshots.set(link,snapshot);
+      const key=norm(row.uniqueId).toLowerCase();const collected=rowInstances.get(key)||{row,items:[]};collected.items.push(snapshot);rowInstances.set(key,collected);
+    }
+    for(const [key,collected] of rowInstances){
+      const ordered=[...collected.items].sort((a,b)=>a.modifiedAt.localeCompare(b.modifiedAt));const latest=ordered[ordered.length-1];
+      const consistent=ordered.every(item=>Number(item.sequence)===Number(latest.sequence)&&item.status===latest.status);
+      snapshots.set(key,{sequence:latest.sequence,status:latest.status,linkCount:ordered.length,consistent});
+      if(!state.dirtyIds.has(collected.row.uniqueId)){
+        collected.row.sequence=latest.sequence;
+        if(latest.status)collected.row.status=latest.status;
+        collected.row.updatedAt=displayTimestamp(latest.modifiedAt)||collected.row.updatedAt;
       }
     }
     sort();render();
-    if(announce)setStatus(`Loaded ${loaded} saved schedule rows from Trimble`,`${psetConfig.libraryName} / ${psetConfig.definitionName}`);
-    return {loaded,snapshots};
+    if(announce)setStatus(`Loaded ${rowInstances.size} saved schedule rows from Trimble`,`${psetConfig.libraryName} / ${psetConfig.definitionName}`);
+    return {loaded:rowInstances.size,snapshots,instances:instanceSnapshots};
   }
   async function initializeTrimbleStorage({load=true}={}) {
     if(!state.accessToken||!state.project)return false;
@@ -222,18 +239,40 @@
     try{if(await ensureAccessToken())await initializeTrimbleStorage({load:true});}
     catch(error){setStatus("Could not request Trimble storage permission",error.message||String(error));}
   }
+  async function externalIdsForRuntimeIds(modelId,ids) {
+    const resolved=new Map();const viewer=state.workspace?.viewer;
+    if(!viewer||typeof viewer.convertToObjectIds!=="function"||!ids.length)return resolved;
+    const convert=async batch=>{
+      try{
+        const externalIds=await viewer.convertToObjectIds(modelId,batch);
+        batch.forEach((runtimeId,index)=>{const externalId=norm(externalIds?.[index]);if(externalId)resolved.set(runtimeId,externalId);});
+      }catch(error){
+        if(batch.length<2)return;
+        const middle=Math.ceil(batch.length/2);await convert(batch.slice(0,middle));await convert(batch.slice(middle));
+      }
+    };
+    for(let start=0;start<ids.length;start+=500)await convert(ids.slice(start,start+500));
+    return resolved;
+  }
   async function collectAssemblies(rawGroups, modelNames, found) {
     for (const group of groups(rawGroups)) {
       const modelId=group.modelId||group.model?.id||group.id; if(!modelId) continue;
       const modelName=group.modelName||group.name||group.model?.name||modelNames.get(modelId)||"Model";
       const objects=Array.isArray(group.objects)?group.objects:[];
       const ids=[...new Set(flattenRuntimeIds(objects))];
+      const candidateOwners=new Map();
       state.allObjectIds.push({modelId,objectRuntimeIds:ids});
       for (const item of objects) { const row=toAssembly(modelId,modelName,item); if(row)mergeAssembly(found,row); }
       for (let start=0; start<ids.length; start+=500) {
-        const properties=await state.workspace.viewer.getObjectProperties(modelId,ids.slice(start,start+500)).catch(()=>[]);
-        for (const item of properties || []) { const row=toAssembly(modelId,modelName,item); if(row)mergeAssembly(found,row); }
+        const batch=ids.slice(start,start+500);
+        const properties=await state.workspace.viewer.getObjectProperties(modelId,batch).catch(()=>[]);
+        for (const item of properties||[]) {
+          const row=toAssembly(modelId,modelName,item);if(!row)continue;mergeAssembly(found,row);
+          row.runtimeIds.forEach(runtimeId=>candidateOwners.set(runtimeId,norm(row.uniqueId).toLowerCase()));
+        }
       }
+      const externalIds=await externalIdsForRuntimeIds(modelId,[...candidateOwners.keys()]);
+      for(const [runtimeId,externalId] of externalIds){const row=found.get(candidateOwners.get(runtimeId));if(!row)continue;row.objectGuids=[...new Set([...objectGuidsOf(row),externalId])];row.objectGuid=row.objectGuids[0]||"";}
     }
   }
   async function refresh() {
@@ -245,7 +284,7 @@
       await collectAssemblies(await state.workspace.viewer.getObjects().catch(()=>[]),names,found);
       if (!found.size) await collectAssemblies(await state.workspace.viewer.getObjects({selected:true}).catch(()=>[]),names,found);
       if (!found.size) { setStatus("No assemblies found", "Full-model refresh completed, but no objects exposed both Unique ID and an assembly mark/type."); return; }
-      state.assemblies=[...found.values()]; sort(); render(); setStatus(`Loaded ${state.assemblies.length} assemblies`, "Full-model refresh completed. Import Excel to fill the Seq column and update status.");
+      state.assemblies=[...found.values()]; sort(); render();const externalIdCount=state.assemblies.reduce((count,row)=>count+objectGuidsOf(row).length,0);setStatus(`Loaded ${state.assemblies.length} assemblies`, `Full-model refresh completed · ${externalIdCount} IFC object IDs resolved. Import Excel to fill the Seq column and update status.`);
       if(state.storage&&state.accessToken)await loadSavedSchedule().catch(error=>setStatus("Assemblies loaded, but saved schedule could not be read",error.message||String(error)));
     } catch (error) { setStatus("Could not read model assemblies", error.message || String(error)); } finally { els.refresh.disabled=false; }
   }
@@ -288,16 +327,18 @@
     await saveRowsToTrimble([row]);
   }
 
-  const psetLinkForRow = row => row.psetLink || (row.objectGuid ? `frn:entity:${row.objectGuid}` : "");
-  function preparePSetChange(row) {
-    const s=state.storage;const sequence=Number(row.sequence);const link=psetLinkForRow(row);
-    if(row.ambiguousGuid)throw new Error(`${row.uniqueId}: the same Unique ID belongs to more than one IFC GUID.`);
-    if(!link)throw new Error(`${row.uniqueId}: IFC GlobalId/GUID was not exposed by the loaded model.`);
+  function preparePSetChanges(row) {
+    const s=state.storage;const sequence=Number(row.sequence);const objectGuids=objectGuidsOf(row);
+    if(!objectGuids.length)throw new Error(`${row.uniqueId}: no IFC external IDs were resolved from the loaded model.`);
     if(!Number.isInteger(sequence)||sequence<1)throw new Error(`${row.uniqueId}: Sequence Number must be a whole number of 1 or greater.`);
     if(!statuses.includes(row.status))throw new Error(`${row.uniqueId}: Installation Status is invalid.`);
     const props={[s.keys.uniqueId]:row.uniqueId,[s.keys.sequence]:sequence,[s.keys.status]:s.statusValues[row.status]};
     if(s.keys.assemblyPosition&&row.assemblyMark)props[s.keys.assemblyPosition]=row.assemblyMark;
-    return {row,expected:{sequence,status:row.status},item:{link,libId:s.libraryId,defId:s.definitionId,schemaV:s.schemaVersion,v:Number.isInteger(row.psetVersion)?row.psetVersion:-1,props}};
+    const existing=psetInstancesOf(row);
+    return objectGuids.map(objectGuid=>{
+      const link=`frn:entity:${objectGuid}`;const saved=existing[link];
+      return {row,link,expected:{sequence,status:row.status},item:{link,libId:s.libraryId,defId:s.definitionId,schemaV:s.schemaVersion,v:Number.isInteger(saved?.v)?saved.v:-1,props}};
+    });
   }
   async function saveRowsToTrimble(rows) {
     if(state.saveInFlight)return false;
@@ -305,10 +346,10 @@
     if(!uniqueRows.length)return setStatus("Nothing is staged for Trimble");
     try{
       if(!await ensureAccessToken()){uniqueRows.forEach(row=>state.pendingWriteIds.add(row.uniqueId));return false;}
-      if(!await initializeTrimbleStorage({load:false}))return false;
+      if(!await initializeTrimbleStorage({load:true}))return false;
       uniqueRows.forEach(row=>state.pendingWriteIds.delete(row.uniqueId));state.saveInFlight=true;render();setStatus(`Saving ${uniqueRows.length} schedule rows to Trimble…`,"The access token remains only in this page's JavaScript memory.");
-      const plans=[];const validationErrors=[];
-      uniqueRows.forEach(row=>{try{plans.push(preparePSetChange(row));}catch(error){validationErrors.push(error.message||String(error));}});
+      const plans=[];const rowPlans=new Map();const validationErrors=[];
+      uniqueRows.forEach(row=>{try{const prepared=preparePSetChanges(row);rowPlans.set(norm(row.uniqueId).toLowerCase(),prepared);plans.push(...prepared);}catch(error){validationErrors.push(error.message||String(error));}});
       if(!plans.length){setStatus("No rows could be saved",validationErrors[0]||"No valid schedule rows were found.");return false;}
       const returned=[];const serviceErrors=[];
       for(let start=0;start<plans.length;start+=500){
@@ -320,17 +361,18 @@
       const returnedByLink=new Map(returned.map(item=>[item.link,item]));
       const successfulPlans=plans.filter(plan=>!failedLinks.has(plan.item.link)&&(returnedByLink.has(plan.item.link)||returned.length===0));
       for(const plan of successfulPlans){
-        const saved=returnedByLink.get(plan.item.link);if(saved){plan.row.psetLink=saved.link;plan.row.psetVersion=saved.v;plan.row.psetSchemaVersion=saved.schemaV;plan.row.updatedAt=displayTimestamp(saved.modifiedAt)||stamp();}
-        state.dirtyIds.delete(plan.row.uniqueId);
+        const saved=returnedByLink.get(plan.item.link);if(saved){psetInstancesOf(plan.row)[saved.link]={v:saved.v,schemaV:saved.schemaV,modifiedAt:saved.modifiedAt};plan.row.psetLink ||= saved.link;plan.row.psetVersion ??= saved.v;plan.row.psetSchemaVersion ??= saved.schemaV;plan.row.updatedAt=displayTimestamp(saved.modifiedAt)||stamp();}
       }
-      let readBack={snapshots:new Map()};let readBackError="";
+      let readBack={snapshots:new Map(),instances:new Map()};let readBackError="";
       try{readBack=await loadSavedSchedule({announce:false});}catch(error){readBackError=error.message||String(error);}
-      const verified=successfulPlans.filter(plan=>{const actual=readBack.snapshots.get(norm(plan.row.uniqueId).toLowerCase());return actual&&Number(actual.sequence)===plan.expected.sequence&&actual.status===plan.expected.status;}).length;
-      const remaining=validationErrors.length+serviceErrors.length+(successfulPlans.length-verified);
+      const verifiedLinks=new Set(successfulPlans.filter(plan=>{const actual=readBack.instances.get(plan.link);return actual&&Number(actual.sequence)===plan.expected.sequence&&actual.status===plan.expected.status;}).map(plan=>plan.link));
+      const verifiedRows=uniqueRows.filter(row=>{const prepared=rowPlans.get(norm(row.uniqueId).toLowerCase());return prepared?.length&&prepared.every(plan=>verifiedLinks.has(plan.link));});
+      verifiedRows.forEach(row=>state.dirtyIds.delete(row.uniqueId));
+      const remaining=uniqueRows.length-verifiedRows.length;
       const firstServiceError=serviceErrors[0]?.message||serviceErrors[0]?.code||"";
-      if(readBackError)setStatus(`Saved ${successfulPlans.length} rows, but read-back failed`,readBackError);
-      else if(remaining)setStatus(`Saved and verified ${verified} of ${uniqueRows.length} rows`,`${remaining} row(s) remain unresolved. ${validationErrors[0]||firstServiceError||"Trimble read-back did not match the submitted value."}`);
-      else setStatus(`Saved and verified ${verified} schedule rows in Trimble`,`${psetConfig.libraryName} / ${psetConfig.definitionName}`);
+      if(readBackError)setStatus(`Submitted ${successfulPlans.length} IFC object links, but read-back failed`,readBackError);
+      else if(remaining)setStatus(`Saved and verified ${verifiedRows.length} of ${uniqueRows.length} schedule rows`,`${remaining} row(s) remain unresolved · ${verifiedLinks.size} of ${plans.length} IFC object links verified. ${validationErrors[0]||firstServiceError||"Trimble read-back did not match every linked object."}`);
+      else setStatus(`Saved and verified ${verifiedRows.length} schedule rows in Trimble`,`${verifiedLinks.size} IFC object links · ${psetConfig.libraryName} / ${psetConfig.definitionName}`);
       return remaining===0&&!readBackError;
     }catch(error){setStatus("Trimble save failed",error.message||String(error));return false;}
     finally{state.saveInFlight=false;render();}
@@ -429,7 +471,7 @@
   async function resumeStorageWithToken(value) {
     const token=permissionToken(value);if(!token)return;
     state.accessToken=token;
-    const pendingRows=state.assemblies.filter(row=>state.pendingWriteIds.has(row.uniqueId));const ready=await initializeTrimbleStorage({load:!pendingRows.length});
+    const pendingRows=state.assemblies.filter(row=>state.pendingWriteIds.has(row.uniqueId));const ready=await initializeTrimbleStorage({load:true});
     if(ready&&pendingRows.length)await saveRowsToTrimble(pendingRows);
   }
   async function reloadProject() {
